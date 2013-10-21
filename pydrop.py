@@ -22,22 +22,21 @@ _conn=None
 _bucket=None 
 
 
-def sync_tree(folder, last_sync, server_files, array=[]):
+def sync_local_tree(folder, last_server_sync, server_files, array=[]):
 	contents = os.listdir(folder)
-	key = folder[len(_local_path):]
+	key = folder  #folder[len(_local_path):]
 	
 	for item in contents:
 		full_filename = os.path.join(folder, item)
 		if os.path.isfile(full_filename):
-			# print item + ' is file'
 			last_modified = os.stat(full_filename).st_mtime
-			file = key + item.split('/')[-1]
+			file = os.path.normpath( key + os.sep  + os.path.basename(item) )
 			if file[0] == '.':
 				continue
 
-			if last_sync < last_modified:
+			if last_server_sync < last_modified:
 				array.append(file)
-				print '[local] add: ' + file 
+				print '[remote] add: ' + file 
 				upload_file(file)
 
 			elif server_files.get(file, None) == None:
@@ -46,28 +45,25 @@ def sync_tree(folder, last_sync, server_files, array=[]):
 				os.remove(full_filename)
 
 			elif server_files[file] > last_modified:
+				print 'Server version: %f, last modified: %s' % (server_files[file], last_modified)
 				print '[local] update: ' + file
 				download_file(file) 
 
 			server_files.pop(file, None)
 		else:
-			# print item + ' is folder'
-			get_tree(full_filename, last_sync, array)
+			sync_local_tree(full_filename, last_server_sync, server_files, array=array)
 	
 	return array
 
 
-def fetch_orphan_remotes(new_server_files, last_modification):
+def fetch_orphan_remotes(new_server_files, last_modification=0):
 	for file in new_server_files.keys():
 		if new_server_files[file] > last_modification:
 			print '[local] add: ' + file
 			download_file(file)
 		else:
 			print '[Remote] delete: ' + file 
-			s3 = get_conn()
-			bucket = get_bucket()
-			bucket.get_key(file).delete()
-			print 'File deleted.'
+			delete_remote_file(file)
 
 
 def get_remote_tree():
@@ -80,30 +76,43 @@ def get_remote_tree():
 
 		epoch = (datetime.strptime(key.last_modified[:-1], '%Y-%m-%dT%H:%M:%S.%f') 
 							- datetime(1970, 1, 1)).total_seconds()
-		files[key.name] = epoch 
-
+		files[_local_path + key.name] = epoch 
+	print 'Remote files count: %d' % len(files) 
 	return files 
 	
+
+def delete_remote_file(file):
+	s3 = get_conn()
+	bucket = get_bucket()
+	bucket.get_key(file[len(_local_path):]).delete()
+	print 'File deleted.'
+
 
 def upload_file(file):
 	print 'Uploading file: ' + file
 	conn = get_conn()
 	bucket = get_bucket()
-	key = bucket.new_key(file)
-	key.set_contents_from_filename(os.path.join(_local_path, file))
+	key = bucket.new_key(file[len(_local_path):])
+	key.set_contents_from_filename(file)
 	print 'Upload completed.'
 
 
 def download_file(file):
 	conn = get_conn()
 	bucket = get_bucket()
-	file_key = bucket.get_key(file)
+	test = file[len(_local_path):]
+	print 'Getting ' + test 
+	file_key = bucket.get_key(file[len(_local_path):])
 	if file_key is None:
 		print file + ' does not exist.'
 		return
 	
 	print 'Downloading ' + file
-	file_key.get_contents_to_filename(os.path.join(_local_path, file))
+	path = os.path.join(_local_path, file)
+	if not os.path.exists(os.path.dirname(path)):
+		os.makedirs(os.path.dirname(path))
+
+	file_key.get_contents_to_filename(path)
 	print 'File downloaded.'
 
 
@@ -174,10 +183,10 @@ def init_bucket(bucket, local_path):
 	# key.set_acl('public-read')	
 
 
-def refresh_server_date():
+def refresh_server_date(epoch):
 	s3 = get_conn()
 	bucket = get_bucket()
-	server_conf = {"last_sync": time.time() }
+	server_conf = {"last_sync": epoch }
 	key = bucket.get_key('.server.conf')
 	key.set_contents_from_string(yaml.dump(server_conf, default_flow_style=False))
 
@@ -241,15 +250,20 @@ def main(argv):
 			print_usage()
 			exit(2)
 				
-	
-	while True:	
+	i=0	
+	while True:		
+		print i
 		conf = load_local_config()
 		last_sever_sync = get_remote_sync_date()
 		files = get_remote_tree()
-		sync_tree(_local_path, last_sever_sync, files)
+		sync_local_tree(conf['local_folder'], last_sever_sync, files)
 		fetch_orphan_remotes(files, conf['last_modify'])
-		refresh_server_date()
-		write_local_config(_bucket_name, _local_path, time.time())
+
+		last_sync = time.time()
+		write_local_config(_bucket_name, _local_path, last_sync)
+		refresh_server_date(last_sync)
+		#sys.exit(2)
+		i += 1
 
 
 if __name__ == '__main__':
